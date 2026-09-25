@@ -1,4 +1,4 @@
-# 1. توليد السيناريو عبر Gemini API
+# 1. توليد السيناريو عبر Gemini API (باستخدام Interactions API الحديثة)
 def generate_script(prompt: str, api_key: str) -> dict:
     client = genai.Client(api_key=api_key)
     
@@ -17,10 +17,14 @@ def generate_script(prompt: str, api_key: str) -> dict:
     }
     """
     
-    response = client.models.generate_content(
+    interaction = client.interactions.create(
         model="gemini-2.5-flash",
-        contents=f"اكتب قصة أطفال عن: {prompt}",
-        config={"response_mime_type": "application/json", "system_instruction": system_instruction}
+        input=f"اكتب قصة أطفال عن: {prompt}\n\n{system_instruction}"
     )
     
-    return json.loads(response.text)
+    # تنظيف النص واستخراج الـ JSON
+    text_response = interaction.outputs[-1].text
+    if text_response.startswith("```json"):
+        text_response = text_response.replace("```json", "").replace("```", "").strip()
+        
+    return json.loads(text_response)
