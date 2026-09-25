@@ -44,29 +44,21 @@ easy for kids to understand), warm and positive tone, no violence, no scary cont
 
 You must return ONLY valid JSON, no markdown fences, no commentary, matching exactly this schema:
 
-{
+{{
   "title": "string - short title in Arabic",
-  "character_bible": "string - one paragraph in English describing every recurring character's
-       fixed visual appearance (species/age, exact colors, clothing, distinguishing features).
-       This paragraph will be repeated in every single image prompt, so it must be short but
-       precise and must never change between scenes.",
+  "character_bible": "string - one paragraph in English describing every recurring character's fixed visual appearance (species/age, exact colors, clothing, distinguishing features). This paragraph will be repeated in every single image prompt, so it must be short but precise and must never change between scenes.",
   "scenes": [
-    {
+    {{
       "narration_ar": "string - 1 to 3 short Arabic sentences of narration/dialogue for this scene",
-      "action_and_setting_en": "string in English - what happens in this scene and where,
-           written for an image generation model (setting, action, mood, camera framing).
-           Do NOT repeat the character description here, only the action/setting."
-    }
+      "action_and_setting_en": "string in English - what happens in this scene and where, written for an image generation model (setting, action, mood, camera framing). Do NOT repeat the character description here, only the action/setting."
+    }}
   ]
-}
+}}
 
 Rules:
-- Produce between {min_scenes} and {max_scenes} scenes that together tell a complete short story
-  with a beginning, a small problem/adventure, and a happy resolution.
-- Keep narration simple and read-aloud friendly; total narration across all scenes should take
-  roughly {target_seconds} seconds to speak aloud (~2.4 words/second average Arabic narration pace).
-- Never include song lyrics or references to background music; the video will have voice and
-  ambient sound effects only, never music.
+- Produce between {min_scenes} and {max_scenes} scenes that together tell a complete short story with a beginning, a small problem/adventure, and a happy resolution.
+- Keep narration simple and read-aloud friendly; total narration across all scenes should take roughly {target_seconds} seconds to speak aloud (~2.4 words/second average Arabic narration pace).
+- Never include song lyrics or references to background music; the video will have voice and ambient sound effects only, never music.
 - Never mention brand names, real people, or copyrighted characters.
 """
 
