@@ -1,52 +1,45 @@
 import os
-import json
-import google.generativeai as genai
+import requests
 
-# استدعاء الإعدادات بطريقة آمنة لتجنب أخطاء المسارات
+# استدعاء الإعدادات بطريقة آمنة لتجنب أخطاء المسارات النسبية
 try:
     import config
 except ImportError:
     from src import config
 
-def generate_script(prompt_text, num_scenes=3):
-    """
-    توليد السيناريو والوصف الخاص بكل مشهد بناءً على فكرة المستخدم
-    """
-    # تهيئة مفتاح API الخاص بـ Gemini
-    api_key = getattr(config, "GEMINI_API_KEY", os.getenv("GEMINI_API_KEY"))
-    if not api_key:
-        raise ValueError("لم يتم العثور على مفتاح GEMINI_API_KEY في ملف config أو بيئة العمل.")
-        
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
 
-    prompt = f"""
-    أنت كاتب سيناريو محترف لقصص الأطفال الكرتونية.
-    اكتب سيناريو قصة طفل بناءً على الفكرة التالية: "{prompt_text}".
-    المطلوب إنشاء بالضبط {num_scenes} مشاهد.
-    
-    أخرج النتيجة بصيغة JSON فقط بهذه الهيكلية الدقيقة بدون أي نص إضافي:
-    {{
-      "scenes": [
-        {{
-          "scene_number": 1,
-          "narration": "النص الصوتي الذي سيتحدث به الراوي",
-          "image_prompt": "وصف دقيق للمشهد باللغة الإنجليزية لتوليد الصورة AI cartoon style"
-        }}
-      ]
-    }}
-    """
+def _seed_for(story_title: str) -> int:
+    """توليد seed ثابت بناءً على عنوان القصة لضمان تناسق الصور"""
+    return sum(ord(c) for c in story_title) % 100000
 
-    response = model.generate_content(prompt)
-    text_response = response.text.strip()
-    
-    # تنظيف المخرج من علامات markdown إن وجدت
-    if text_response.startswith("```json"):
-        text_response = text_response[7:]
-    if text_response.startswith("```"):
-        text_response = text_response[3:]
-    if text_response.endswith("```"):
-        text_response = text_response[:-3]
 
-    data = json.loads(text_response.strip())
-    return data
+def generate_images(script_data, output_dir="generated_images"):
+    """توليد صور المشاهد بناءً على الوصف الموجود في script_data"""
+    os.makedirs(output_dir, exist_ok=True)
+    images_paths = []
+
+    scenes = script_data.get("scenes", [])
+    title = script_data.get("title", "cartoon_story")
+    seed = _seed_for(title)
+
+    for scene in scenes:
+        scene_num = scene.get("scene_number", 1)
+        prompt = scene.get("image_prompt", "")
+
+        # إضافة طابع كرتوني ثابت وموحد للقصة
+        full_prompt = f"Kids storybook illustration, vibrant colors, cute cartoon style, {prompt}"
+        encoded_prompt = requests.utils.quote(full_prompt)
+
+        # استخدام خدمة Pollinations لتوليد الصور بدون تعقيد
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1280&height=720&seed={seed}&nologo=true"
+
+        response = requests.get(image_url)
+        if response.status_code == 200:
+            file_path = os.path.join(output_dir, f"scene_{scene_num}.png")
+            with open(file_path, "wb") as f:
+                f.write(response.content)
+            images_paths.append(file_path)
+        else:
+            raise Exception(f"فشل في توليد الصورة للمشهد {scene_num}")
+
+    return images_paths
