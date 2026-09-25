@@ -1,19 +1,18 @@
 import json
 from google import genai
 
-# 1. توليد السيناريو عبر Gemini API
 def generate_script(prompt: str, api_key: str) -> dict:
     client = genai.Client(api_key=api_key)
     
     system_instruction = """
-    أنت مؤلف قصص أطفال محترف. قم بكتابة قصة أطفال قصيرة وممتعة بناءً على الطلب.
-    يجب أن ترجع النتيجة بصيغة JSON حصراً بالهيكل التالي:
+    You are a professional children story writer. Write a short story based on the prompt.
+    Return JSON format only:
     {
-      "title": "عنوان القصة",
+      "title": "Story Title",
       "scenes": [
         {
           "scene_number": 1,
-          "narration": "النص العربي الصريح الموجه للأطفال للراوي",
+          "narration": "Arabic text for narration",
           "image_prompt": "English detailed prompt for image generation, cute 2D cartoon style"
         }
       ]
@@ -22,7 +21,7 @@ def generate_script(prompt: str, api_key: str) -> dict:
     
     response = client.models.generate_content(
         model="gemini-2.5-flash",
-        contents=f"اكتب قصة أطفال عن: {prompt}\n\n{system_instruction}"
+        contents=f"Write a children story in Arabic about: {prompt}\n\n{system_instruction}"
     )
     
     text_response = response.text
