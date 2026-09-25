@@ -1,127 +1,79 @@
-"""
-Kids Cartoon Video Generator — Streamlit App
-=============================================
-Paste a topic (or a full draft script) and get back:
-  1. A ~2 minute Arabic narrated cartoon video (script -> images -> voiceover
-     -> subtitles -> MP4), and
-  2. 3-4 automatically extracted vertical (9:16) "shorts" cut along scene
-     boundaries, ready for YouTube Shorts / TikTok / Reels.
-No background music is ever added, in either output. No paid/watermarked
-services are used.
-"""
-
 import os
-import shutil
-import time
-import traceback
-
+import io
+import json
+import zipfile
 import streamlit as st
 
-from src import config
-from src.script_generator import generate_story_package
-from src.image_generator import generate_all_images
-from src.tts_generator import generate_all_voiceovers
-from src.subtitle_utils import render_all_subtitles
-from src.video_assembler import assemble_video
-from src.shorts_extractor import extract_shorts
+# استدعاء وحدات التوليد فقط من مجلد src
+from src.script_generator import generate_script
+from src.image_generator import generate_images
+from src.tts_generator import generate_audio
+from src.subtitle_utils import generate_subtitles
 
-st.set_page_config(page_title="Kids Cartoon Video Generator", page_icon="🎬", layout="centered")
+st.set_page_config(page_title="Kids Cartoon Generator - Phase 1", page_icon="🎨", layout="centered")
 
-st.title("🎬 Kids Cartoon Video Generator")
-st.caption(
-    "Topic or script → automated ~2 min Arabic cartoon video. "
-    "Voice + natural sound effects only — never background music."
-)
+st.title("🎨 مولّد مشاهد الكرتون (الأداة الأولى)")
+st.write("قم بتوليد النص، الصور، والأصوات واستخراجها في حزمة مضغوطة جاهزة للمونتاج.")
 
-with st.sidebar:
-    st.header("Settings")
-    voice_label = st.selectbox("Narrator voice", list(config.ARABIC_VOICES.keys()), index=0)
-    voice = config.ARABIC_VOICES[voice_label]
-    st.markdown("---")
-    st.markdown(
-        "**Free stack used:**\n"
-        "- Script: Google Gemini (free tier)\n"
-        "- Images: Pollinations.ai (free, no watermark)\n"
-        "- Voice: edge-tts (free, no watermark)\n"
-        "- Assembly: moviepy / ffmpeg\n"
-        "- Shorts: moviepy center-crop to 9:16, no new deps"
-    )
-    if not config.GEMINI_API_KEY:
-        st.warning("GEMINI_API_KEY not set. Add it in Settings → Secrets before generating.")
+# مدخلات المستخدم
+prompt = st.text_area("أدخل فكرة القصة أو السيناريو:", placeholder="مثال: قصة قصيرة عن أرنب شجاع يتعلم الصدق...")
+num_scenes = st.slider("عدد المشاهد:", min_value=1, max_value=10, value=3)
 
-topic = st.text_area(
-    "Topic or draft script",
-    placeholder="e.g. أرنب صغير يتعلم مشاركة ألعابه مع أصدقائه في الغابة",
-    height=150,
-)
+if st.button("🚀 بدء توليد الحزمة", type="primary"):
+    if not prompt.strip():
+        st.warning("رجاءً أدخل فكرة القصة أولاً.")
+    else:
+        try:
+            with st.spinner("1️⃣ جاري كتابة السيناريو..."):
+                script_data = generate_script(prompt, num_scenes)
+                st.success("تم توليد السيناريو بنجاح!")
 
-run_button = st.button("Generate video", type="primary", disabled=not topic.strip())
+            with st.spinner("2️⃣ جاري توليد وتجهيز الصور..."):
+                images_paths = generate_images(script_data)
+                st.success("تم توليد الصور بنجاح!")
 
-if "run_id" not in st.session_state:
-    st.session_state.run_id = 0
+            with st.spinner("3️⃣ جاري إنشاء الأصوات البشرية والتحقق منها..."):
+                audio_paths = generate_audio(script_data)
+                st.success("تم توليد الأصوات بنجاح!")
 
-if run_button:
-    st.session_state.run_id += 1
-    run_id = st.session_state.run_id
-    run_dir = os.path.join(config.WORKDIR, f"run_{run_id}")
-    images_dir = os.path.join(run_dir, "images")
-    audio_dir = os.path.join(run_dir, "audio")
-    subs_dir = os.path.join(run_dir, "subtitles")
-    output_path = os.path.join(config.OUTPUT_DIR, f"story_{run_id}.mp4")
+            with st.spinner("4️⃣ جاري إنتاج ملفات الترجمة والتوقيت..."):
+                subtitle_paths = generate_subtitles(script_data)
 
-    progress = st.progress(0, text="Starting...")
+            # ضغط جميع المخرجات في ذاكرة الرام (In-Memory ZIP) لتجنب استهلاك القرص الصلب
+            with st.spinner("📦 جاري تجميع الحزمة في ملف ZIP..."):
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                    # إضافة ملف السيناريو بصيغة JSON
+                    zip_file.writestr("script.json", json.dumps(script_data, ensure_ascii=False, indent=2))
+                    
+                    # إضافة الصور
+                    for img_path in images_paths:
+                        if os.path.exists(img_path):
+                            zip_file.write(img_path, arcname=f"images/{os.path.basename(img_path)}")
+                            
+                    # إضافة الأصوات
+                    for aud_path in audio_paths:
+                        if os.path.exists(aud_path):
+                            zip_file.write(aud_path, arcname=f"audio/{os.path.basename(aud_path)}")
+                            
+                    # إضافة الترجمات
+                    for sub_path in subtitle_paths:
+                        if os.path.exists(sub_path):
+                            zip_file.write(sub_path, arcname=f"subtitles/{os.path.basename(sub_path)}")
 
-    try:
-        progress.progress(5, text="Writing script and scene breakdown...")
-        package = generate_story_package(topic)
-        st.subheader(package.title)
-        with st.expander("Character bible (kept identical across every scene)"):
-            st.write(package.character_bible)
-        with st.expander(f"Scenes ({len(package.scenes)})"):
-            for s in package.scenes:
-                st.markdown(f"**Scene {s.index + 1}:** {s.narration_ar}")
+                zip_buffer.seek(0)
 
-        progress.progress(25, text="Generating illustrations for each scene...")
-        image_paths = generate_all_images(package.scenes, package.title, images_dir)
+            st.balloons()
+            st.success("✨ اكتملت الحزمة بنجاح وخفيفة جداً على السيرفر!")
+            
+            # زر تحميل الـ ZIP مباشرة على الجوال
+            st.download_button(
+                label="📥 تحميل حزمة المشروع (ZIP)",
+                data=zip_buffer,
+                file_name="cartoon_assets_bundle.zip",
+                mime="application/zip",
+                use_container_width=True
+            )
 
-        progress.progress(55, text="Generating Arabic voiceover for each scene...")
-        audio_paths = generate_all_voiceovers(package.scenes, audio_dir, voice=voice)
-
-        progress.progress(75, text="Rendering subtitles...")
-        subtitle_paths = render_all_subtitles(package.scenes, subs_dir)
-
-        progress.progress(85, text="Assembling final video (no music, ever)...")
-        long_video_path, scene_boundaries = assemble_video(
-            package.scenes, image_paths, audio_paths, subtitle_paths, output_path
-        )
-
-        progress.progress(93, text="Extracting vertical shorts (9:16) for Reels/TikTok/Shorts...")
-        shorts_dir = os.path.join(run_dir, config.SHORTS_DIRNAME)
-        short_paths = extract_shorts(long_video_path, scene_boundaries, shorts_dir)
-
-        progress.progress(100, text="Done!")
-        st.success("Long video and shorts generated successfully.")
-
-        st.subheader("🎥 Full story video")
-        st.video(long_video_path)
-        with open(long_video_path, "rb") as f:
-            st.download_button("Download full MP4", f, file_name=f"{package.title}.mp4", mime="video/mp4")
-
-        st.subheader(f"📱 Auto-generated shorts ({len(short_paths)})")
-        st.caption("Vertical 9:16, center-cropped, same voice + captions, still no music.")
-        for i, short_path in enumerate(short_paths, start=1):
-            st.markdown(f"**Short {i}**")
-            st.video(short_path)
-            with open(short_path, "rb") as f:
-                st.download_button(
-                    f"Download short_scene_{i}.mp4",
-                    f,
-                    file_name=f"short_scene_{i}.mp4",
-                    mime="video/mp4",
-                    key=f"short_dl_{run_id}_{i}",
-                )
-
-    except Exception as e:  # noqa: BLE001
-        progress.empty()
-        st.error(f"Generation failed: {e}")
-        st.code(traceback.format_exc())
+        except Exception as e:
+            st.error(f"حدث خطأ أثناء التوليد: {str(e)}")
