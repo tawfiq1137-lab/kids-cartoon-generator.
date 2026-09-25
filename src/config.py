@@ -1,31 +1,28 @@
 """
 Central configuration for the Kids Cartoon Video Generator.
-No paid/watermarked services are referenced anywhere in this project.
+Optimized for Free Cloud Tiers (Low Memory & CPU).
 """
 
 import os
 
 # ---------------------------------------------------------------------------
-# API KEYS (all optional except the LLM key you choose to use)
-# Set these as environment variables, or in Streamlit Cloud -> Settings -> Secrets
+# API KEYS
 # ---------------------------------------------------------------------------
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")          # free tier: https://google.com
-# Pollinations.ai and edge-tts require NO API key at all.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # ---------------------------------------------------------------------------
-# VIDEO SETTINGS
+# VIDEO SETTINGS (Optimized for Free Server Tier)
 # ---------------------------------------------------------------------------
-VIDEO_WIDTH = 1024
-VIDEO_HEIGHT = 576          # 16:9, matches Pollinations default aspect well
-FPS = 24
-TARGET_TOTAL_SECONDS = 120   # ~2 minutes
-MIN_SCENES = 6
-MAX_SCENES = 10
+VIDEO_WIDTH = 640            # تخفيض الأبعاد لتخفيف المعالجة
+VIDEO_HEIGHT = 360           # أبعاد مريحة جداً للسيرفرات وتظل واضحة
+FPS = 12                     # تقليص الإطارات لتسريع الرندرة 3 أضعاف
+TARGET_TOTAL_SECONDS = 45    # جعل القصة الأولى حوالي 45 ثانية لتجربة ثبات النظام
+MIN_SCENES = 3               # تقليل عدد المشاهد في البداية
+MAX_SCENES = 4
 
 # ---------------------------------------------------------------------------
-# TTS SETTINGS (edge-tts, 100% free, no watermark, no key needed)
+# TTS SETTINGS (edge-tts, 100% free)
 # ---------------------------------------------------------------------------
-# A few natural-sounding Arabic voices available in edge-tts:
 ARABIC_VOICES = {
     "female_expressive": "ar-EG-SalmaNeural",
     "male_warm": "ar-EG-ShakirNeural",
@@ -33,14 +30,14 @@ ARABIC_VOICES = {
     "male_saudi": "ar-SA-HamedNeural",
 }
 DEFAULT_VOICE = ARABIC_VOICES["female_expressive"]
-TTS_RATE = "+0%"     # e.g. "+10%" for faster narration
+TTS_RATE = "+0%"
 TTS_PITCH = "+0Hz"
 
 # ---------------------------------------------------------------------------
-# IMAGE GENERATION (Pollinations.ai - free, no key, no watermark)
+# IMAGE GENERATION (Pollinations.ai)
 # ---------------------------------------------------------------------------
 POLLINATIONS_BASE_URL = "https://pollinations.ai"
-IMAGE_MODEL = "flux"        # good free model on Pollinations for illustration style
+IMAGE_MODEL = "flux"
 IMAGE_STYLE_SUFFIX = (
     "children's cartoon illustration, flat colors, thick clean outlines, "
     "storybook style, soft lighting, simple background, no text, no watermark, no logo"
@@ -49,12 +46,12 @@ IMAGE_STYLE_SUFFIX = (
 # ---------------------------------------------------------------------------
 # SUBTITLES
 # ---------------------------------------------------------------------------
-SUBTITLE_FONT_PATH = None    # set to a .ttf path with Arabic glyph support if you have one
-SUBTITLE_FONT_SIZE = 44
-SUBTITLE_COLORS = ["#FFD93D", "#6BCB77", "#4D96FF", "#FF6B6B", "#C780FA"]  # rotates per scene
+SUBTITLE_FONT_PATH = None
+SUBTITLE_FONT_SIZE = 24       # تصغير حجم الخط ليتناسب مع الأبعاد الجديدة
+SUBTITLE_COLORS = ["#FFD93D", "#6BCB77", "#4D96FF", "#FF6B6B"]
 SUBTITLE_STROKE_COLOR = "#1A1A1A"
-SUBTITLE_STROKE_WIDTH = 3
-SUBTITLE_MARGIN_BOTTOM = 60
+SUBTITLE_STROKE_WIDTH = 2
+SUBTITLE_MARGIN_BOTTOM = 30
 
 # ---------------------------------------------------------------------------
 # WORKING DIRECTORIES
@@ -68,27 +65,22 @@ for d in (WORKDIR, IMAGES_DIR, AUDIO_DIR, OUTPUT_DIR):
     os.makedirs(d, exist_ok=True)
 
 # ---------------------------------------------------------------------------
-# AUTOMATED SHORTS EXTRACTOR
+# AUTOMATED SHORTS EXTRACTOR (Optimized)
 # ---------------------------------------------------------------------------
 SHORTS_DIRNAME = "shorts_output"
 SHORTS_OUTPUT_DIR = os.path.join(WORKDIR, SHORTS_DIRNAME)
 os.makedirs(SHORTS_OUTPUT_DIR, exist_ok=True)
 
-SHORTS_MIN_SECONDS = 30
-SHORTS_MAX_SECONDS = 50
-SHORTS_TARGET_MIN_CLIPS = 3
-SHORTS_TARGET_MAX_CLIPS = 4
+SHORTS_MIN_SECONDS = 10
+SHORTS_MAX_SECONDS = 25
+SHORTS_TARGET_MIN_CLIPS = 1
+SHORTS_TARGET_MAX_CLIPS = 2
 
-# Vertical 9:16 output resolution for YouTube Shorts / TikTok
-SHORTS_WIDTH = 1080
-SHORTS_HEIGHT = 1920
+# Vertical Shorts Resolution (Optimized)
+SHORTS_WIDTH = 480
+SHORTS_HEIGHT = 854
 
 # ---------------------------------------------------------------------------
-# HARD PROJECT RULE — enforced in code, not just in prompts:
-# NO_BACKGROUND_MUSIC must stay True. video_assembler.py never mixes in a
-# music track even if this is somehow flipped; it is kept here only as a
-# documented, explicit guardrail. shorts_extractor.py only ever takes
-# sub-clips of the already-rendered long video (voice + burned-in captions
-# already in the frames), so no shorts code path can introduce music either.
+# HARD PROJECT RULE
 # ---------------------------------------------------------------------------
 NO_BACKGROUND_MUSIC = True
