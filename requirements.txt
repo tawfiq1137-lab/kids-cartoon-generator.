@@ -1,0 +1,5 @@
+streamlit
+google-genai
+requests
+edge-tts
+moviepy==1.0.3
