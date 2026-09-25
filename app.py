@@ -1,19 +1,35 @@
 import os
+import sys
 import io
 import json
 import zipfile
 import streamlit as st
 
-# استدعاء وحدات التوليد فقط من مجلد src
-from src.script_generator import generate_script
-from src.image_generator import generate_images
-from src.tts_generator import generate_audio
-from src.subtitle_utils import generate_subtitles
+# إضافة المجلد الرئيسي ومجلد src لمسارات بايثون لمنع أخطاء ImportError
+root_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.join(root_dir, "src")
+
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
+# استدعاء وحدات التوليد
+try:
+    from script_generator import generate_script
+    from image_generator import generate_images
+    from tts_generator import generate_audio
+    from subtitle_utils import generate_subtitles
+except ImportError:
+    from src.script_generator import generate_script
+    from src.image_generator import generate_images
+    from src.tts_generator import generate_audio
+    from src.subtitle_utils import generate_subtitles
 
 st.set_page_config(page_title="Kids Cartoon Generator - Phase 1", page_icon="🎨", layout="centered")
 
 st.title("🎨 مولّد مشاهد الكرتون (الأداة الأولى)")
-st.write("قم بتوليد النص، الصور، والأصوات واستخراجها في حزمة مضغوطة جاهزة للمونتاج.")
+st.write("قم بتوليد النص، الصور، والأصوات واستخرجها في حزمة مضغوطة جاهزة للمونتاج.")
 
 # مدخلات المستخدم
 prompt = st.text_area("أدخل فكرة القصة أو السيناريو:", placeholder="مثال: قصة قصيرة عن أرنب شجاع يتعلم الصدق...")
