@@ -2,7 +2,7 @@ import json
 from google import genai
 
 def generate_script(prompt: str, api_key: str) -> dict:
-    client = genai.Client(api_key=api_key)
+        client = genai.Client(api_key=api_key)
     
     system_instruction = """
     You are a professional children story writer. Write a short story based on the prompt.
