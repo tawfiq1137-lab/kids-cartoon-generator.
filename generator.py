@@ -30,7 +30,7 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 TEXT_MODEL = "google/gemini-2.5-flash"
 IMAGE_MODEL = "google/gemini-2.5-flash-image"
-TTS_MODEL = "openai/gpt-4o-mini-tts-2025-12-15"
+TTS_MODEL = "openai/gpt-4o-mini-tts"
 TTS_VOICE = "alloy"
 
 MAX_RETRIES = 3
