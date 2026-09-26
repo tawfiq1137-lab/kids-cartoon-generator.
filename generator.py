@@ -30,8 +30,9 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 TEXT_MODEL = "google/gemini-2.5-flash"
 IMAGE_MODEL = "google/gemini-2.5-flash-image"
-TTS_MODEL = "openai/gpt-4o-mini-tts"
+TTS_MODEL = "openai/gpt-audio-mini"
 TTS_VOICE = "alloy"
+TTS_FORMAT = "wav"
 
 MAX_RETRIES = 3
 RETRY_BASE_DELAY_SECONDS = 3
@@ -247,7 +248,9 @@ def generate_images(scenes: List[dict], output_dir: str, api_key: str) -> Dict[i
 # --------------------------------------------------------------------------
 def generate_audios(scenes: List[dict], output_dir: str, api_key: str) -> Dict[int, str]:
     """
-    يولّد تعليقاً صوتياً واحداً لكل مشهد عبر OpenRouter Audio Speech endpoint.
+    يولّد تعليقاً صوتياً واحداً لكل مشهد عبر OpenRouter chat/completions
+    (بمودالية صوت)، بدل مسار audio/speech المخصص الذي له قائمة نماذج محدودة
+    خاصة قد لا تتطابق مع كتالوج النماذج العام.
 
     Returns:
         dict بالشكل {scene_number: مسار ملف الصوت}
@@ -265,19 +268,27 @@ def generate_audios(scenes: List[dict], output_dir: str, api_key: str) -> Dict[i
 
         payload = {
             "model": TTS_MODEL,
-            "input": narration,
-            "voice": TTS_VOICE,
-            "response_format": "mp3",
+            "modalities": ["text", "audio"],
+            "audio": {"voice": TTS_VOICE, "format": TTS_FORMAT},
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"اقرأ النص التالي بصوت دافئ يناسب سرد قصص للأطفال: {narration}",
+                }
+            ],
         }
 
         try:
             response = _post_with_retry(
-                f"{OPENROUTER_BASE_URL}/audio/speech", api_key, payload
+                f"{OPENROUTER_BASE_URL}/chat/completions", api_key, payload
             )
-            # استجابة هذا المسار بايتات صوت خام مباشرة، وليست JSON
-            file_path = os.path.join(output_dir, f"scene_{scene_number}.mp3")
+            data = response.json()
+            b64_audio = data["choices"][0]["message"]["audio"]["data"]
+            audio_bytes = base64.b64decode(b64_audio)
+
+            file_path = os.path.join(output_dir, f"scene_{scene_number}.{TTS_FORMAT}")
             with open(file_path, "wb") as f:
-                f.write(response.content)
+                f.write(audio_bytes)
             audio_paths[scene_number] = file_path
 
         except Exception as e:
