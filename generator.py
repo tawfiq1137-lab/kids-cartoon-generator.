@@ -18,6 +18,7 @@ import json
 import os
 import re
 import time
+import wave
 import zipfile
 from typing import Dict, List
 
@@ -32,7 +33,8 @@ TEXT_MODEL = "google/gemini-2.5-flash"
 IMAGE_MODEL = "google/gemini-2.5-flash-image"
 TTS_MODEL = "openai/gpt-audio-mini"
 TTS_VOICE = "alloy"
-TTS_FORMAT = "mp3"
+TTS_FORMAT = "pcm16"
+PCM_SAMPLE_RATE = 24000  # التردد القياسي المستخدم في مخرجات صوت OpenAI
 
 MAX_RETRIES = 3
 RETRY_BASE_DELAY_SECONDS = 3
@@ -359,13 +361,16 @@ def generate_audios(scenes: List[dict], output_dir: str, api_key: str) -> Dict[i
         }
 
         try:
-            audio_bytes = _post_streaming_audio(
+            pcm_bytes = _post_streaming_audio(
                 f"{OPENROUTER_BASE_URL}/chat/completions", api_key, payload
             )
 
-            file_path = os.path.join(output_dir, f"scene_{scene_number}.{TTS_FORMAT}")
-            with open(file_path, "wb") as f:
-                f.write(audio_bytes)
+            file_path = os.path.join(output_dir, f"scene_{scene_number}.wav")
+            with wave.open(file_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)  # pcm16 = 2 بايت لكل عينة
+                wf.setframerate(PCM_SAMPLE_RATE)
+                wf.writeframes(pcm_bytes)
             audio_paths[scene_number] = file_path
 
         except Exception as e:
