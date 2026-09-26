@@ -16,7 +16,14 @@ st.set_page_config(
 )
 
 st.title("🎨 مولد حزمة قصص الأطفال")
-st.write("أنشئ النص، والصور، والصوت لقصتك في ثوانٍ، وقم بتحميلها كحزمة جاهزة للمونتاج!")
+st.write(
+    "أنشئ النص، والصور، والصوت لقصتك في ثوانٍ، وقم بتحميلها كحزمة جاهزة "
+    "للمونتاج!"
+)
+st.caption(
+    "🎭 الشخصيات ثابتة تلقائياً في كل قصة: عائلة سعود وسارة (بأسلوب "
+    "3D Pixar)، لا تحتاج لوصفها — فقط اكتب فكرة الأحداث."
+)
 
 # --------------------------------------------------------------------------
 # تهيئة session_state
@@ -44,12 +51,12 @@ def cleanup_work_dir():
 # --------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ الإعدادات")
-    api_key = st.text_input("مفتاح Gemini API:", type="password")
+    api_key = st.text_input("مفتاح OpenRouter API:", type="password")
     st.caption("لن يتم تخزين المفتاح؛ يُستخدم فقط أثناء هذه الجلسة.")
 
 prompt = st.text_area(
-    "فكرة القصة:",
-    placeholder="مثال: قصة أرنب صغير يتعلم أصل الصدق والوفاء بالعهد",
+    "فكرة أحداث القصة:",
+    placeholder="مثال: سعود وسارة يتعلمون أهمية الصدق أثناء لعبهم في الحديقة",
     height=100,
 )
 
@@ -74,7 +81,7 @@ if generate_clicked:
     prompt = (prompt or "").strip()
 
     if not api_key:
-        st.error("⚠️ يرجى إدخال مفتاح Gemini API أولاً!")
+        st.error("⚠️ يرجى إدخال مفتاح OpenRouter API أولاً!")
     elif not prompt:
         st.error("⚠️ يرجى إدخال فكرة القصة!")
     elif len(prompt) < 5:
@@ -92,16 +99,16 @@ if generate_clicked:
 
         status = st.status("جاري إعداد القصة...", expanded=True)
         try:
-            status.write("📝 1. جاري كتابة السيناريو بالذكاء الاصطناعي...")
+            status.write("📝 1. جاري كتابة السيناريو (نص صافٍ فقط، بدون مقدمات AI)...")
             script = generate_script(prompt, api_key)
 
             if not script.get("scenes"):
                 raise ValueError("لم يتم توليد أي مشاهد للقصة، حاول بفكرة أخرى.")
 
-            status.write("🖼️ 2. جاري رسم صور المشاهد...")
+            status.write("🖼️ 2. جاري رسم صور المشاهد (هوية شخصيات ثابتة، بدون نص على الصورة)...")
             img_paths = generate_images(script["scenes"], images_dir, api_key)
 
-            status.write("🎙️ 3. جاري تسجيل التعليق الصوتي...")
+            status.write("🎙️ 3. جاري تسجيل التعليق الصوتي (قراءة صافية للنص فقط)...")
             audio_paths = generate_audios(script["scenes"], audio_dir, api_key)
 
             status.write("📦 4. جاري ضغط جميع الملفات في حزمة ZIP...")
