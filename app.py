@@ -99,13 +99,13 @@ if generate_clicked:
                 raise ValueError("لم يتم توليد أي مشاهد للقصة، حاول بفكرة أخرى.")
 
             status.write("🖼️ 2. جاري رسم صور المشاهد...")
-            img_paths = generate_images(script["scenes"], images_dir)
+            img_paths = generate_images(script["scenes"], images_dir, api_key)
 
             status.write("🎙️ 3. جاري تسجيل التعليق الصوتي...")
-            audio_paths = generate_audios(script["scenes"], audio_dir)
+            audio_paths = generate_audios(script["scenes"], audio_dir, api_key)
 
             status.write("📦 4. جاري ضغط جميع الملفات في حزمة ZIP...")
-            zip_file = create_zip_package(script, images_dir, audio_dir)
+            zip_file = create_zip_package(script, images_dir, audio_dir, work_dir)
 
             # نقرأ محتوى الملف في الذاكرة فوراً حتى يبقى زر التحميل يعمل
             # حتى بعد أي إعادة تحديث لاحقة للصفحة
