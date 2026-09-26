@@ -32,7 +32,7 @@ TEXT_MODEL = "google/gemini-2.5-flash"
 IMAGE_MODEL = "google/gemini-2.5-flash-image"
 TTS_MODEL = "openai/gpt-audio-mini"
 TTS_VOICE = "alloy"
-TTS_FORMAT = "wav"
+TTS_FORMAT = "mp3"
 
 MAX_RETRIES = 3
 RETRY_BASE_DELAY_SECONDS = 3
@@ -246,11 +246,90 @@ def generate_images(scenes: List[dict], output_dir: str, api_key: str) -> Dict[i
 # --------------------------------------------------------------------------
 # 3) توليد التعليق الصوتي
 # --------------------------------------------------------------------------
+def _post_streaming_audio(url: str, api_key: str, json_payload: dict) -> bytes:
+    """
+    يرسل POST مع stream=True ويجمّع أجزاء الصوت (audio.data) المرسلة تباعاً
+    عبر Server-Sent Events، ثم يعيد البايتات الكاملة بعد فك ترميز base64.
+    بعض نماذج الصوت (مثل openai/gpt-audio-mini) لا تقبل الصوت إلا مع البث.
+    """
+    last_error_message = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = requests.post(
+                url,
+                headers=_headers(api_key),
+                json=json_payload,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                stream=True,
+            )
+        except requests.exceptions.RequestException as e:
+            last_error_message = f"فشل الاتصال بالشبكة: {e}"
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BASE_DELAY_SECONDS * attempt)
+            continue
+
+        if response.status_code != 200:
+            if response.status_code in (401, 402, 403):
+                raise RuntimeError(
+                    f"خطأ في المفتاح أو الرصيد ({response.status_code}): {response.text[:500]}"
+                )
+            if response.status_code == 404:
+                raise RuntimeError(
+                    f"النموذج غير موجود على OpenRouter (404): {response.text[:500]}"
+                )
+            if response.status_code == 429 or response.status_code >= 500:
+                last_error_message = f"{response.status_code}: {response.text[:500]}"
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_BASE_DELAY_SECONDS * attempt)
+                continue
+            raise RuntimeError(
+                f"خطأ غير متوقع ({response.status_code}): {response.text[:500]}"
+            )
+
+        audio_chunks: List[bytes] = []
+        try:
+            for line in response.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[len("data:"):].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                audio_part = delta.get("audio")
+                if audio_part and audio_part.get("data"):
+                    audio_chunks.append(base64.b64decode(audio_part["data"]))
+        except requests.exceptions.RequestException as e:
+            last_error_message = f"انقطع البث أثناء الاستقبال: {e}"
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BASE_DELAY_SECONDS * attempt)
+            continue
+
+        if audio_chunks:
+            return b"".join(audio_chunks)
+
+        last_error_message = "لم يصل أي صوت ضمن أجزاء البث."
+        if attempt < MAX_RETRIES:
+            time.sleep(RETRY_BASE_DELAY_SECONDS * attempt)
+
+    raise RuntimeError(
+        f"فشلت المحاولات المتكررة ({MAX_RETRIES}) في استقبال الصوت.\n"
+        f"تفاصيل آخر خطأ: {last_error_message}"
+    )
+
+
 def generate_audios(scenes: List[dict], output_dir: str, api_key: str) -> Dict[int, str]:
     """
     يولّد تعليقاً صوتياً واحداً لكل مشهد عبر OpenRouter chat/completions
-    (بمودالية صوت)، بدل مسار audio/speech المخصص الذي له قائمة نماذج محدودة
-    خاصة قد لا تتطابق مع كتالوج النماذج العام.
+    (بمودالية صوت وبث مباشر stream=True، وهو ما يتطلبه هذا النموذج تحديداً).
 
     Returns:
         dict بالشكل {scene_number: مسار ملف الصوت}
@@ -270,6 +349,7 @@ def generate_audios(scenes: List[dict], output_dir: str, api_key: str) -> Dict[i
             "model": TTS_MODEL,
             "modalities": ["text", "audio"],
             "audio": {"voice": TTS_VOICE, "format": TTS_FORMAT},
+            "stream": True,
             "messages": [
                 {
                     "role": "user",
@@ -279,12 +359,9 @@ def generate_audios(scenes: List[dict], output_dir: str, api_key: str) -> Dict[i
         }
 
         try:
-            response = _post_with_retry(
+            audio_bytes = _post_streaming_audio(
                 f"{OPENROUTER_BASE_URL}/chat/completions", api_key, payload
             )
-            data = response.json()
-            b64_audio = data["choices"][0]["message"]["audio"]["data"]
-            audio_bytes = base64.b64decode(b64_audio)
 
             file_path = os.path.join(output_dir, f"scene_{scene_number}.{TTS_FORMAT}")
             with open(file_path, "wb") as f:
