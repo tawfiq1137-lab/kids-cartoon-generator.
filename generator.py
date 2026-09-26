@@ -1,65 +1,107 @@
 """
 generator.py
 ------------
-الوحدة المسؤولة عن كل خطوات توليد حزمة قصة الأطفال باستخدام مكتبة
-google-genai الجديدة:
+الوحدة المسؤولة عن كل خطوات توليد حزمة قصة الأطفال، عبر OpenRouter
+(https://openrouter.ai) بدل الاتصال المباشر بـ Google — لتفادي تعقيدات
+الفوترة المباشرة مع Google Cloud لحسابات الأفراد في السعودية.
 
-    1. generate_script  -> كتابة السيناريو (نص) عبر Gemini.
-    2. generate_images  -> رسم صورة لكل مشهد عبر Gemini (gemini-2.5-flash-image).
-    3. generate_audios  -> تسجيل تعليق صوتي لكل مشهد عبر Gemini TTS.
+    1. generate_script  -> كتابة السيناريو (نص) عبر Gemini (chat/completions).
+    2. generate_images  -> رسم صورة لكل مشهد عبر Gemini Image (images endpoint).
+    3. generate_audios  -> تسجيل تعليق صوتي لكل مشهد عبر TTS (audio/speech endpoint).
     4. create_zip_package -> تجميع كل الملفات (نص + صور + صوت) في حزمة ZIP واحدة.
+
+كل الدوال تحتاج مفتاح OpenRouter API (يبدأ بـ sk-or-v1-...) بدل مفتاح Gemini.
 """
 
+import base64
 import json
 import os
 import re
 import time
-import wave
 import zipfile
 from typing import Dict, List
 
-from google import genai
-from google.genai import types
-from google.genai import errors as genai_errors
+import requests
 
 # --------------------------------------------------------------------------
-# أسماء النماذج
+# إعدادات OpenRouter
 # --------------------------------------------------------------------------
-TEXT_MODEL = "gemini-3.8-flash"
-IMAGE_MODEL = "gemini-2.5-flash-image"
-TTS_MODEL = "gemini-2.5-flash-preview-tts"
-TTS_VOICE = "Kore"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-# إعدادات إعادة المحاولة التلقائية عند ازدحام خوادم Google (خطأ 503)
+TEXT_MODEL = "google/gemini-2.5-flash"
+IMAGE_MODEL = "google/gemini-2.5-flash-image"
+TTS_MODEL = "openai/gpt-4o-mini-tts-2025-12-15"
+TTS_VOICE = "alloy"
+
 MAX_RETRIES = 3
 RETRY_BASE_DELAY_SECONDS = 3
+REQUEST_TIMEOUT_SECONDS = 120
 
 
-def _call_with_retry(func, *args, **kwargs):
+def _headers(api_key: str) -> dict:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        # اختياري لكن مفيد ليظهر مشروعك بشكل أوضح في لوحة OpenRouter
+        "HTTP-Referer": "https://kids-cartoon-generator.streamlit.app",
+        "X-Title": "Kids Cartoon Generator",
+    }
+
+
+def _post_with_retry(url: str, api_key: str, json_payload: dict = None,
+                      expect_json: bool = True):
     """
-    ينفّذ func(*args, **kwargs) ويعيد المحاولة تلقائياً عند أخطاء الخوادم
-    المؤقتة (503 ازدحام، 429 تجاوز الحصة)، مع فاصل زمني متزايد بين المحاولات.
+    يرسل POST مع إعادة محاولة تلقائية عند 429 (تجاوز حصة/معدل) أو 5xx
+    (مشاكل خوادم مؤقتة). يرجع naturally الاستجابة (Response) أو يرفع استثناء واضح.
     """
-    last_error = None
+    last_error_message = None
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            return func(*args, **kwargs)
-        except genai_errors.ServerError as e:
-            last_error = e
-        except genai_errors.ClientError as e:
-            # 429 = تجاوز حصة الاستخدام (Rate limit)، يستحق إعادة محاولة أيضاً
-            if getattr(e, "code", None) == 429:
-                last_error = e
-            else:
-                raise
+            response = requests.post(
+                url,
+                headers=_headers(api_key),
+                json=json_payload,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except requests.exceptions.RequestException as e:
+            last_error_message = f"فشل الاتصال بالشبكة: {e}"
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BASE_DELAY_SECONDS * attempt)
+            continue
 
-        if attempt < MAX_RETRIES:
-            time.sleep(RETRY_BASE_DELAY_SECONDS * attempt)
+        if response.status_code == 200:
+            return response
+
+        # 401/403 = مفتاح خاطئ أو صلاحيات ناقصة، 402 = رصيد غير كافٍ
+        if response.status_code in (401, 402, 403):
+            raise RuntimeError(
+                f"خطأ في المفتاح أو الرصيد ({response.status_code}): {response.text[:500]}"
+            )
+
+        # 404 = نموذج غير موجود
+        if response.status_code == 404:
+            raise RuntimeError(
+                f"النموذج غير موجود على OpenRouter (404): {response.text[:500]}"
+            )
+
+        # 429 و 5xx تستحق إعادة المحاولة
+        if response.status_code == 429 or response.status_code >= 500:
+            last_error_message = f"{response.status_code}: {response.text[:500]}"
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BASE_DELAY_SECONDS * attempt)
+            continue
+
+        # أي خطأ آخر غير متوقع: لا داعي لإعادة المحاولة
+        raise RuntimeError(
+            f"خطأ غير متوقع ({response.status_code}): {response.text[:500]}"
+        )
 
     raise RuntimeError(
-        f"فشلت المحاولات المتكررة ({MAX_RETRIES}) بسبب ازدحام خوادم Google أو تجاوز الحصة.\n"
-        f"يرجى الانتظار قليلاً ثم إعادة المحاولة.\nتفاصيل آخر خطأ: {last_error}"
-    ) from last_error
+        f"فشلت المحاولات المتكررة ({MAX_RETRIES}) بسبب ازدحام الخوادم أو تجاوز الحصة.\n"
+        f"يرجى الانتظار قليلاً ثم إعادة المحاولة.\nتفاصيل آخر خطأ: {last_error_message}"
+    )
+
 
 # --------------------------------------------------------------------------
 # 1) توليد السيناريو (النص)
@@ -112,23 +154,29 @@ def _clean_json_text(text: str) -> str:
 
 def generate_script(prompt: str, api_key: str) -> dict:
     """
-    يولّد سيناريو قصة أطفال باستخدام Gemini، ويعيد النتيجة كـ dict:
+    يولّد سيناريو قصة أطفال عبر OpenRouter (chat/completions)، ويعيد النتيجة كـ dict:
     {"title": "...", "scenes": [{"scene_number", "narration", "image_prompt"}, ...]}
     """
-    client = genai.Client(api_key=api_key)
+    payload = {
+        "model": TEXT_MODEL,
+        "messages": [
+            {"role": "system", "content": SYSTEM_INSTRUCTION},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.9,
+    }
 
-    response = _call_with_retry(
-        client.models.generate_content,
-        model=TEXT_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
-            response_mime_type="application/json",
-            temperature=0.9,
-        ),
+    response = _post_with_retry(
+        f"{OPENROUTER_BASE_URL}/chat/completions", api_key, payload
     )
+    data = response.json()
 
-    cleaned_text = _clean_json_text(response.text)
+    try:
+        raw_text = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise ValueError(f"استجابة غير متوقعة من النموذج: {data}") from e
+
+    cleaned_text = _clean_json_text(raw_text)
 
     try:
         result = json.loads(cleaned_text)
@@ -152,13 +200,12 @@ def generate_script(prompt: str, api_key: str) -> dict:
 # --------------------------------------------------------------------------
 def generate_images(scenes: List[dict], output_dir: str, api_key: str) -> Dict[int, str]:
     """
-    يولّد صورة واحدة لكل مشهد باستخدام gemini-2.5-flash-image.
+    يولّد صورة واحدة لكل مشهد عبر OpenRouter Images endpoint (Gemini 2.5 Flash Image).
 
     Returns:
         dict بالشكل {scene_number: مسار ملف الصورة}
     """
     os.makedirs(output_dir, exist_ok=True)
-    client = genai.Client(api_key=api_key)
 
     image_paths: Dict[int, str] = {}
 
@@ -169,28 +216,23 @@ def generate_images(scenes: List[dict], output_dir: str, api_key: str) -> Dict[i
         if not image_prompt:
             continue
 
+        payload = {
+            "model": IMAGE_MODEL,
+            "prompt": image_prompt,
+        }
+
         try:
-            response = _call_with_retry(
-                client.models.generate_content,
-                model=IMAGE_MODEL,
-                contents=[image_prompt],
-                config=types.GenerateContentConfig(
-                    response_modalities=["TEXT", "IMAGE"],
-                ),
+            response = _post_with_retry(
+                f"{OPENROUTER_BASE_URL}/images", api_key, payload
             )
+            data = response.json()
+            b64_image = data["data"][0]["b64_json"]
+            image_bytes = base64.b64decode(b64_image)
 
-            saved = False
-            for part in response.candidates[0].content.parts:
-                if getattr(part, "inline_data", None) is not None:
-                    file_path = os.path.join(output_dir, f"scene_{scene_number}.png")
-                    with open(file_path, "wb") as f:
-                        f.write(part.inline_data.data)
-                    image_paths[scene_number] = file_path
-                    saved = True
-                    break
-
-            if not saved:
-                raise RuntimeError("لم يُرجع النموذج أي بيانات صورة لهذا المشهد.")
+            file_path = os.path.join(output_dir, f"scene_{scene_number}.png")
+            with open(file_path, "wb") as f:
+                f.write(image_bytes)
+            image_paths[scene_number] = file_path
 
         except Exception as e:
             raise RuntimeError(
@@ -203,25 +245,14 @@ def generate_images(scenes: List[dict], output_dir: str, api_key: str) -> Dict[i
 # --------------------------------------------------------------------------
 # 3) توليد التعليق الصوتي
 # --------------------------------------------------------------------------
-def _save_wave_file(file_path: str, pcm_data: bytes, channels: int = 1,
-                     rate: int = 24000, sample_width: int = 2) -> None:
-    """حفظ بيانات PCM الخام كملف WAV صالح للتشغيل."""
-    with wave.open(file_path, "wb") as wf:
-        wf.setnchannels(channels)
-        wf.setsampwidth(sample_width)
-        wf.setframerate(rate)
-        wf.writeframes(pcm_data)
-
-
 def generate_audios(scenes: List[dict], output_dir: str, api_key: str) -> Dict[int, str]:
     """
-    يولّد تعليقاً صوتياً واحداً لكل مشهد باستخدام Gemini TTS.
+    يولّد تعليقاً صوتياً واحداً لكل مشهد عبر OpenRouter Audio Speech endpoint.
 
     Returns:
         dict بالشكل {scene_number: مسار ملف الصوت}
     """
     os.makedirs(output_dir, exist_ok=True)
-    client = genai.Client(api_key=api_key)
 
     audio_paths: Dict[int, str] = {}
 
@@ -232,26 +263,21 @@ def generate_audios(scenes: List[dict], output_dir: str, api_key: str) -> Dict[i
         if not narration:
             continue
 
-        try:
-            response = _call_with_retry(
-                client.models.generate_content,
-                model=TTS_MODEL,
-                contents=narration,
-                config=types.GenerateContentConfig(
-                    response_modalities=["AUDIO"],
-                    speech_config=types.SpeechConfig(
-                        voice_config=types.VoiceConfig(
-                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                voice_name=TTS_VOICE,
-                            )
-                        )
-                    ),
-                ),
-            )
+        payload = {
+            "model": TTS_MODEL,
+            "input": narration,
+            "voice": TTS_VOICE,
+            "response_format": "mp3",
+        }
 
-            pcm_data = response.candidates[0].content.parts[0].inline_data.data
-            file_path = os.path.join(output_dir, f"scene_{scene_number}.wav")
-            _save_wave_file(file_path, pcm_data)
+        try:
+            response = _post_with_retry(
+                f"{OPENROUTER_BASE_URL}/audio/speech", api_key, payload
+            )
+            # استجابة هذا المسار بايتات صوت خام مباشرة، وليست JSON
+            file_path = os.path.join(output_dir, f"scene_{scene_number}.mp3")
+            with open(file_path, "wb") as f:
+                f.write(response.content)
             audio_paths[scene_number] = file_path
 
         except Exception as e:
@@ -292,17 +318,14 @@ def create_zip_package(script: dict, images_dir: str, audio_dir: str, output_dir
     zip_path = os.path.join(output_dir, f"{safe_title}.zip")
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        # 1. ملف السيناريو الكامل بصيغة JSON
         zf.writestr("story.json", json.dumps(script, ensure_ascii=False, indent=2))
 
-        # 2. الصور
         if os.path.isdir(images_dir):
             for file_name in sorted(os.listdir(images_dir)):
                 full_path = os.path.join(images_dir, file_name)
                 if os.path.isfile(full_path):
                     zf.write(full_path, arcname=os.path.join("images", file_name))
 
-        # 3. الملفات الصوتية
         if os.path.isdir(audio_dir):
             for file_name in sorted(os.listdir(audio_dir)):
                 full_path = os.path.join(audio_dir, file_name)
