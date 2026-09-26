@@ -23,7 +23,7 @@ from google.genai import types
 # --------------------------------------------------------------------------
 # أسماء النماذج
 # --------------------------------------------------------------------------
-TEXT_MODEL = "gemini-2.5-flash"
+TEXT_MODEL = "gemini-3.8-flash"
 IMAGE_MODEL = "gemini-2.5-flash-image"
 TTS_MODEL = "gemini-2.5-flash-preview-tts"
 TTS_VOICE = "Kore"
