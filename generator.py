@@ -13,12 +13,14 @@ google-genai الجديدة:
 import json
 import os
 import re
+import time
 import wave
 import zipfile
 from typing import Dict, List
 
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 
 # --------------------------------------------------------------------------
 # أسماء النماذج
@@ -27,6 +29,37 @@ TEXT_MODEL = "gemini-3.8-flash"
 IMAGE_MODEL = "gemini-2.5-flash-image"
 TTS_MODEL = "gemini-2.5-flash-preview-tts"
 TTS_VOICE = "Kore"
+
+# إعدادات إعادة المحاولة التلقائية عند ازدحام خوادم Google (خطأ 503)
+MAX_RETRIES = 3
+RETRY_BASE_DELAY_SECONDS = 3
+
+
+def _call_with_retry(func, *args, **kwargs):
+    """
+    ينفّذ func(*args, **kwargs) ويعيد المحاولة تلقائياً عند أخطاء الخوادم
+    المؤقتة (503 ازدحام، 429 تجاوز الحصة)، مع فاصل زمني متزايد بين المحاولات.
+    """
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return func(*args, **kwargs)
+        except genai_errors.ServerError as e:
+            last_error = e
+        except genai_errors.ClientError as e:
+            # 429 = تجاوز حصة الاستخدام (Rate limit)، يستحق إعادة محاولة أيضاً
+            if getattr(e, "code", None) == 429:
+                last_error = e
+            else:
+                raise
+
+        if attempt < MAX_RETRIES:
+            time.sleep(RETRY_BASE_DELAY_SECONDS * attempt)
+
+    raise RuntimeError(
+        f"فشلت المحاولات المتكررة ({MAX_RETRIES}) بسبب ازدحام خوادم Google أو تجاوز الحصة.\n"
+        f"يرجى الانتظار قليلاً ثم إعادة المحاولة.\nتفاصيل آخر خطأ: {last_error}"
+    ) from last_error
 
 # --------------------------------------------------------------------------
 # 1) توليد السيناريو (النص)
@@ -84,7 +117,8 @@ def generate_script(prompt: str, api_key: str) -> dict:
     """
     client = genai.Client(api_key=api_key)
 
-    response = client.models.generate_content(
+    response = _call_with_retry(
+        client.models.generate_content,
         model=TEXT_MODEL,
         contents=prompt,
         config=types.GenerateContentConfig(
@@ -136,7 +170,8 @@ def generate_images(scenes: List[dict], output_dir: str, api_key: str) -> Dict[i
             continue
 
         try:
-            response = client.models.generate_content(
+            response = _call_with_retry(
+                client.models.generate_content,
                 model=IMAGE_MODEL,
                 contents=[image_prompt],
                 config=types.GenerateContentConfig(
@@ -198,7 +233,8 @@ def generate_audios(scenes: List[dict], output_dir: str, api_key: str) -> Dict[i
             continue
 
         try:
-            response = client.models.generate_content(
+            response = _call_with_retry(
+                client.models.generate_content,
                 model=TTS_MODEL,
                 contents=narration,
                 config=types.GenerateContentConfig(
