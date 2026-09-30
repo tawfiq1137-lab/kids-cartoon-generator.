@@ -5,25 +5,26 @@ generator.py
 الوحدة المسؤولة عن كل خطوات توليد حزمة قصة الأطفال، عبر OpenRouter
 (https://openrouter.ai) بدل الاتصال المباشر بـ Google.
 
-    1. generate_script     -> كتابة السيناريو (نص) عبر Gemini (chat/completions)،
-                               مع تحقق صارم عبر pydantic لضمان نص سرد "صافٍ"
-                               بدون أي مقدمات أو تعليقات من الذكاء الاصطناعي.
-    2. generate_images     -> رسم صورة لكل مشهد عبر Gemini Image، مع دمج
-                               "Master Prompt" ثابت يضمن نفس هوية الشخصيات
-                               (سعود، سارة، الأم، الأب) ونفس الأسلوب الفني في
-                               كل مشهد، ومنع ظهور أي نص داخل الصورة.
-    3. generate_audios     -> تسجيل تعليق صوتي "قراءة صافية" لكل مشهد عبر TTS،
-                               بدون أي إضافات أو تعليقات من النموذج.
-    4. create_zip_package  -> تجميع كل الملفات (نص + صور + صوت) في حزمة ZIP واحدة.
+    1. generate_script     -> كتابة السيناريو، مقسّماً إلى أسطر حوار لكل
+                               مشهد، كل سطر منسوب لمتحدث محدد (راوٍ/سعود/
+                               سارة/الأم/الأب)، مع تحقق صارم عبر pydantic.
+    2. generate_images     -> رسم صورة لكل مشهد، مع "Master Prompt" ثابت
+                               يضمن نفس هوية الشخصيات في كل مشهد، ومنع أي
+                               نص داخل الصورة.
+    3. generate_audios     -> تسجيل تعليق صوتي منفصل لكل سطر حوار بصوت
+                               ونبرة تناسب المتحدث (راوٍ/طفل/طفلة/أم/أب)،
+                               ثم دمج أسطر كل مشهد في ملف صوتي واحد مع
+                               حساب مدة كل سطر بدقة تامة (لا تقدير) لاستخدامها
+                               لاحقاً في مزامنة الترجمة سطراً بسطر.
+    4. create_zip_package  -> تجميع كل الملفات (نص + صور + صوت) في حزمة ZIP.
 
 كل الدوال تحتاج مفتاح OpenRouter API (يبدأ بـ sk-or-v1-...).
 
-ملاحظة مهمة بخصوص الموسيقى والمؤثرات الصوتية:
-هذه الوحدة لا تولّد ولا تضيف أي موسيقى خلفية إطلاقاً (ولا توجد بها أي بنية
-تسمح بذلك). لكل مشهد يختار كاتب السيناريو (اختيارياً) كلمة مفتاحية واحدة
-لمؤثر صوتي طبيعي مناسب (مثل صوت عصافير أو مطر) من قائمة مغلقة محددة سلفاً،
-وتُحفظ هذه الكلمة داخل story.json ليستخدمها لاحقاً "مُجمّع الفيديو" إن توفر
-ملف الصوت الفعلي لهذا المؤثر لديه — هذه الوحدة نفسها لا تنتج ملفات مؤثرات.
+ملاحظة بخصوص الموسيقى والمؤثرات الصوتية:
+هذه الوحدة لا تولّد ولا تضيف أي موسيقى خلفية إطلاقاً. لكل مشهد يختار كاتب
+السيناريو (اختيارياً) كلمة مفتاحية واحدة لمؤثر صوتي طبيعي مناسب من قائمة
+مغلقة محددة سلفاً، تُحفظ داخل story.json ليستخدمها "مُجمّع الفيديو" إن
+توفر ملف الصوت الفعلي لهذا المؤثر لديه.
 """
 
 import base64
@@ -33,7 +34,7 @@ import re
 import time
 import wave
 import zipfile
-from typing import Dict, List, Literal
+from typing import Dict, List, Literal, Optional, Tuple
 
 import requests
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -46,9 +47,12 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 TEXT_MODEL = "google/gemini-2.5-flash"
 IMAGE_MODEL = "google/gemini-2.5-flash-image"
 TTS_MODEL = "openai/gpt-audio-mini"
-TTS_VOICE = "alloy"
 TTS_FORMAT = "pcm16"
 PCM_SAMPLE_RATE = 24000  # التردد القياسي المستخدم في مخرجات صوت OpenAI
+PCM_SAMPLE_WIDTH = 2     # بايتان لكل عينة (pcm16)
+
+# الفاصل الزمني الصامت بين سطرين متتاليين داخل نفس المشهد (بالثواني)
+LINE_GAP_SECONDS = 0.35
 
 MAX_RETRIES = 3
 RETRY_BASE_DELAY_SECONDS = 3
@@ -57,8 +61,42 @@ REQUEST_TIMEOUT_SECONDS = 120
 # القائمة المغلقة المسموح بها لكلمة المؤثر الصوتي لكل مشهد (لا موسيقى إطلاقاً)
 SFX_KEYWORDS = (
     "none", "birds", "rain", "door_open", "children_laughing",
-    "footsteps", "wind",
+    "footsteps", "wind", "blocks",
 )
+
+# --------------------------------------------------------------------------
+# أصوات ونبرات كل متحدث (نفس محرك TTS، بصوت وأسلوب مختلف لكل شخصية)
+# --------------------------------------------------------------------------
+SPEAKER_VOICES = {
+    "narrator": "fable",
+    "saud": "alloy",
+    "sara": "nova",
+    "mother": "shimmer",
+    "father": "onyx",
+}
+
+SPEAKER_STYLE_HINTS = {
+    "narrator": (
+        "narrate in a warm, engaging, story-telling tone with gentle, "
+        "expressive pacing, suitable for narrating a children's story."
+    ),
+    "saud": (
+        "voice a cheerful, energetic, curious young boy around 5 years old, "
+        "with a light, playful, slightly high-pitched child-like tone."
+    ),
+    "sara": (
+        "voice a calm, sweet young girl around 7 years old, with a gentle, "
+        "warm, slightly high-pitched child-like tone."
+    ),
+    "mother": (
+        "voice a warm, tender, caring mother, with a soft and affectionate "
+        "tone."
+    ),
+    "father": (
+        "voice a kind, gentle father, with a warm, calm, slightly deeper "
+        "and reassuring tone."
+    ),
+}
 
 
 def _headers(api_key: str) -> dict:
@@ -152,12 +190,12 @@ NEGATIVE_IMAGE_NOTE = (
 
 
 # --------------------------------------------------------------------------
-# تنظيف نص السرد من أي "دردشة" يضيفها نموذج اللغة (طبقة حماية إضافية فوق
-# التحقق الصارم بواسطة pydantic أدناه)
+# تنظيف نص الحوار من أي "دردشة" يضيفها نموذج اللغة، ومن علامات الاقتباس
+# (طبقة حماية إضافية فوق التحقق الصارم بواسطة pydantic أدناه)
 # --------------------------------------------------------------------------
 _PREAMBLE_PATTERNS = [
     r"^(بالطبع|تفضل\w*|حسناً|حسنا|بكل سرور|طبعاً|طبعا|أكيد)[،,!\s]*",
-    r"^(إليك|هذه|هذا|وهنا)\s+(القصة|النص|السرد|المشهد)[^.:\n]{0,40}[:.]\s*",
+    r"^(إليك|هذه|هذا|وهنا)\s+(القصة|النص|السرد|المشهد|الجملة)[^.:\n]{0,40}[:.]\s*",
     r"^(سأقرأ|سوف أقرأ|سأروي|سأقوم بقراءة|دعني أروي|دعنا نبدأ|لنبدأ)[^.:\n]{0,60}[.:]\s*",
     r"^(بصوت|بأسلوب)\s+[^.:\n]{0,40}[:.]\s*",
 ]
@@ -166,9 +204,14 @@ _POSTAMBLE_PATTERNS = [
     r"\s*(النهاية|-\s*النهاية\s*-|انتهت القصة|أتمنى أن تكون القصة قد أعجبتك)[.!\s]*$",
 ]
 
+# علامات اقتباس/تنصيص بأشكالها المختلفة — غير مسموح بها داخل نص أي سطر لأن
+# نسبة الحوار للمتحدث تغني عنها تماماً، ووجودها يسبب تشوهاً بصرياً في
+# النصوص العربية ثنائية الاتجاه (RTL) عند حرقها كترجمة.
+_QUOTE_CHARS_RE = re.compile(r"[\"'`\u00b4\u2018\u2019\u201c\u201d\u00ab\u00bb]")
+
 
 def clean_narration_text(text: str) -> str:
-    """يزيل أي مقدمة أو خاتمة نمطية للذكاء الاصطناعي من نص السرد، إن وُجدت."""
+    """يزيل أي مقدمة أو خاتمة نمطية للذكاء الاصطناعي، وأي علامات اقتباس."""
     cleaned = (text or "").strip()
     original = cleaned
 
@@ -177,28 +220,41 @@ def clean_narration_text(text: str) -> str:
     for pattern in _POSTAMBLE_PATTERNS:
         cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
 
-    return cleaned or original
+    cleaned = _QUOTE_CHARS_RE.sub("", cleaned).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+
+    return cleaned or _QUOTE_CHARS_RE.sub("", original).strip()
 
 
 # --------------------------------------------------------------------------
 # نماذج pydantic للتحقق الصارم من مخرجات JSON قبل قبولها
 # --------------------------------------------------------------------------
+SpeakerType = Literal["narrator", "saud", "sara", "mother", "father"]
+
+
+class NarrationLine(BaseModel):
+    speaker: SpeakerType = "narrator"
+    text: str = Field(min_length=1)
+    # تُملأ لاحقاً (بعد توليد الصوت) بالمدة الفعلية بالثواني لهذا السطر
+    duration: Optional[float] = None
+
+    @field_validator("text")
+    @classmethod
+    def _pure_text(cls, v: str) -> str:
+        cleaned = clean_narration_text(v)
+        if not cleaned.strip():
+            raise ValueError("نص السطر فارغ بعد التنظيف")
+        return cleaned
+
+
 class Scene(BaseModel):
     scene_number: int
-    narration: str = Field(min_length=1)
+    narration_lines: List[NarrationLine] = Field(min_length=1)
     image_prompt: str = Field(min_length=1)
     sfx: Literal[
         "none", "birds", "rain", "door_open", "children_laughing",
-        "footsteps", "wind",
+        "footsteps", "wind", "blocks",
     ] = "none"
-
-    @field_validator("narration")
-    @classmethod
-    def _pure_narration(cls, v: str) -> str:
-        cleaned = clean_narration_text(v)
-        if not cleaned.strip():
-            raise ValueError("narration فارغ بعد التنظيف")
-        return cleaned
 
 
 class StoryScript(BaseModel):
@@ -232,31 +288,43 @@ SYSTEM_INSTRUCTION = """
   "scenes": [
     {
       "scene_number": 1,
-      "narration": "نص السرد الصافي لهذا المشهد فقط",
+      "narration_lines": [
+        {"speaker": "narrator", "text": "جملة سرد وصفية"},
+        {"speaker": "saud", "text": "جملة حوار قالها سعود"}
+      ],
       "image_prompt": "وصف بالإنجليزية لحدث/حركة هذا المشهد فقط",
       "sfx": "none"
     }
   ]
 }
 
-قواعد إلزامية بخصوص narration (الأهم):
-- اكتب فقط نص القصة كما سيُقرأ للطفل بصوت عالٍ، ولا شيء غير ذلك.
-- ممنوع منعاً باتاً إضافة أي مخاطبة للمستخدم أو مقدمات من نوع: "بالطبع،
-  إليك القصة"، "سأقرأ لك الآن"، "تفضل"، "دعنا نبدأ"، أو أي إشارة إلى أنك
-  مساعد ذكاء اصطناعي يستجيب لطلب. يبدأ النص مباشرة بأحداث القصة.
-- لا تضف خاتمة مثل "النهاية" أو "أتمنى أن تكون القصة أعجبتك" داخل narration.
-- اجعل narration باللغة العربية الفصحى المبسطة المناسبة للأطفال.
+قواعد إلزامية بخصوص narration_lines (الأهم):
+- قسّم كل مشهد إلى أسطر قصيرة (جملة واحدة أو جملتان لكل سطر)، وانسب كل سطر
+  لصاحبه عبر حقل speaker الذي يجب أن يكون بالضبط واحداً من:
+  "narrator" (للسرد الوصفي العام)، "saud"، "sara"، "mother"، "father".
+- استخدم "narrator" لوصف الأحداث، واستخدم اسم الشخصية فقط عندما تتكلم هي
+  فعلاً (حوار مباشر).
+- لا تضع علامات اقتباس أو تنصيص من أي نوع حول الحوار داخل text — نسبة
+  السطر لصاحبه عبر speaker تكفي تماماً، والاقتباس ممنوع كتابياً.
+- اكتب في كل text نصاً صافياً فقط كما سيُقرأ بصوت عالٍ، بدون أي مخاطبة
+  للمستخدم أو مقدمات من نوع: "بالطبع، إليك القصة"، "سأقرأ لك الآن"، أو أي
+  إشارة إلى أنك مساعد ذكاء اصطناعي يستجيب لطلب.
+- لا تضف خاتمة مثل "النهاية" داخل أي سطر.
+- استخدم العربية الفصحى المبسطة المناسبة للأطفال، وتجنب علامات التشكيل
+  النادرة (اكتف بالتشكيل الأساسي إن احتجت، بدون رموز نادرة قد لا تدعمها
+  كل الخطوط).
 
 قواعد بخصوص image_prompt:
 - صف فقط حدث/حركة/تعبيرات هذا المشهد بالإنجليزية، بدون إعادة وصف شكل
   الشخصيات أو الأسلوب الفني (سيُضاف ذلك تلقائياً بثبات لكل المشاهد).
-  مثال جيد: "Saud and Sara playing with a red ball in the sunny garden,
-  both laughing".
+  مثال جيد: "Saud and Sara building a tall tower of colorful blocks
+  together, both smiling".
 - لا تذكر إطلاقاً وجود أي نص أو كتابة داخل الصورة.
 
 قواعد بخصوص sfx (اختياري، بدون موسيقى إطلاقاً):
 - اختر قيمة واحدة فقط من هذه القائمة المغلقة بالضبط حسب أحداث المشهد:
-  "none", "birds", "rain", "door_open", "children_laughing", "footsteps", "wind"
+  "none", "birds", "rain", "door_open", "children_laughing", "footsteps",
+  "wind", "blocks"
 - إن لم يوجد مؤثر مناسب اجعلها "none". ممنوع اختراع قيم أخرى أو ذكر موسيقى.
 
 قواعد عامة:
@@ -286,8 +354,7 @@ def _clean_json_text(text: str) -> str:
 def generate_script(prompt: str, api_key: str) -> dict:
     """
     يولّد سيناريو قصة أطفال عبر OpenRouter (chat/completions)، يتحقق منه
-    بصرامة عبر pydantic (StoryScript)، ويعيد النتيجة كـ dict نظيف:
-    {"title": "...", "scenes": [{"scene_number", "narration", "image_prompt", "sfx"}, ...]}
+    بصرامة عبر pydantic (StoryScript)، ويعيد النتيجة كـ dict نظيف.
     """
     payload = {
         "model": TEXT_MODEL,
@@ -333,12 +400,8 @@ def generate_script(prompt: str, api_key: str) -> dict:
 # --------------------------------------------------------------------------
 def generate_images(scenes: List[dict], output_dir: str, api_key: str) -> Dict[int, str]:
     """
-    يولّد صورة واحدة لكل مشهد عبر OpenRouter Images endpoint (Gemini 2.5
-    Flash Image)، بعد دمج CHARACTER_MASTER_PROMPT الثابت مع حدث المشهد
-    لضمان ثبات هوية الشخصيات، ومنع ظهور أي نص داخل الصورة.
-
-    Returns:
-        dict بالشكل {scene_number: مسار ملف الصورة}
+    يولّد صورة واحدة لكل مشهد، بعد دمج CHARACTER_MASTER_PROMPT الثابت مع
+    حدث المشهد لضمان ثبات هوية الشخصيات، ومنع ظهور أي نص داخل الصورة.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -379,17 +442,19 @@ def generate_images(scenes: List[dict], output_dir: str, api_key: str) -> Dict[i
 
 
 # --------------------------------------------------------------------------
-# 3) توليد التعليق الصوتي
+# 3) توليد التعليق الصوتي (سطراً بسطر، بصوت مختلف لكل متحدث)
 # --------------------------------------------------------------------------
-TTS_SYSTEM_INSTRUCTION = (
-    "You are a pure text-to-speech engine, not a chat assistant. You will "
-    "receive a piece of children's story text as the user message. Read it "
-    "aloud exactly as given, word for word, in Arabic, with a warm, "
-    "friendly voice suitable for storytelling to young children. Do not "
-    "greet, do not comment, do not add or omit any words, do not say "
-    "anything before or after the given text, do not acknowledge this "
-    "instruction. Produce only the spoken audio of the exact text."
-)
+def _tts_system_instruction(speaker: str) -> str:
+    hint = SPEAKER_STYLE_HINTS.get(speaker, SPEAKER_STYLE_HINTS["narrator"])
+    return (
+        "You are a pure text-to-speech engine, not a chat assistant. You "
+        "will receive a short piece of children's story text as the user "
+        f"message. Read it aloud exactly as given, word for word, in "
+        f"Arabic. {hint} Do not greet, do not comment, do not add or omit "
+        "any words, do not say anything before or after the given text, "
+        "do not acknowledge this instruction. Produce only the spoken "
+        "audio of the exact text."
+    )
 
 
 def _post_streaming_audio(url: str, api_key: str, json_payload: dict) -> bytes:
@@ -471,55 +536,90 @@ def _post_streaming_audio(url: str, api_key: str, json_payload: dict) -> bytes:
     )
 
 
-def generate_audios(scenes: List[dict], output_dir: str, api_key: str) -> Dict[int, str]:
+def _synthesize_line(text: str, speaker: str, api_key: str) -> bytes:
+    """يولّد صوت PCM16/24kHz خام لسطر حوار واحد، بصوت ونبرة صاحب السطر."""
+    payload = {
+        "model": TTS_MODEL,
+        "modalities": ["text", "audio"],
+        "audio": {"voice": SPEAKER_VOICES.get(speaker, "alloy"), "format": TTS_FORMAT},
+        "stream": True,
+        "messages": [
+            {"role": "system", "content": _tts_system_instruction(speaker)},
+            {"role": "user", "content": text},
+        ],
+    }
+    return _post_streaming_audio(f"{OPENROUTER_BASE_URL}/chat/completions", api_key, payload)
+
+
+def generate_audios(
+    scenes: List[dict], output_dir: str, api_key: str
+) -> Tuple[Dict[int, str], Dict[int, dict]]:
     """
-    يولّد تعليقاً صوتياً "صافياً" واحداً لكل مشهد عبر OpenRouter
-    chat/completions (بمودالية صوت وبث مباشر stream=True). يُرسل نص السرد
-    فقط كرسالة المستخدم، مع نظام تعليمات صارم يمنع أي تعليق أو مقدمة من
-    النموذج، فلا يُقرأ سوى نص القصة الصافي.
+    يولّد صوتاً منفصلاً لكل سطر حوار (بصوت مناسب للمتحدث)، ثم يدمج أسطر كل
+    مشهد في ملف صوتي واحد (بفاصل صمت قصير LINE_GAP_SECONDS بين الأسطر)،
+    مع حساب مدة كل سطر بدقة تامة من عدد العينات الفعلي (لا تقدير إطلاقاً).
 
     Returns:
-        dict بالشكل {scene_number: مسار ملف الصوت}
+        (audio_paths, line_timing) حيث:
+        - audio_paths: {scene_number: مسار ملف صوت المشهد الكامل (wav)}
+        - line_timing: {scene_number: {"lines": [{"speaker","text","duration"}, ...],
+                                        "gap_seconds": float}}
     """
     os.makedirs(output_dir, exist_ok=True)
 
     audio_paths: Dict[int, str] = {}
+    line_timing: Dict[int, dict] = {}
 
     for scene in scenes:
         scene_number = scene.get("scene_number")
-        narration = clean_narration_text(scene.get("narration", ""))
-
-        if not narration:
+        lines = scene.get("narration_lines") or []
+        if not lines:
             continue
 
-        payload = {
-            "model": TTS_MODEL,
-            "modalities": ["text", "audio"],
-            "audio": {"voice": TTS_VOICE, "format": TTS_FORMAT},
-            "stream": True,
-            "messages": [
-                {"role": "system", "content": TTS_SYSTEM_INSTRUCTION},
-                {"role": "user", "content": narration},
-            ],
+        line_pcms: List[bytes] = []
+        line_meta: List[dict] = []
+
+        for line in lines:
+            speaker = line.get("speaker", "narrator")
+            text = clean_narration_text(line.get("text", ""))
+            if not text:
+                continue
+            try:
+                pcm_bytes = _synthesize_line(text, speaker, api_key)
+            except Exception as e:
+                raise RuntimeError(
+                    f"فشل توليد الصوت لسطر ({speaker}) في المشهد رقم {scene_number}: {e}"
+                ) from e
+
+            duration = len(pcm_bytes) / (PCM_SAMPLE_WIDTH * PCM_SAMPLE_RATE)
+            line_pcms.append(pcm_bytes)
+            line_meta.append({
+                "speaker": speaker,
+                "text": text,
+                "duration": round(duration, 3),
+            })
+
+        if not line_pcms:
+            continue
+
+        gap_samples = int(round(LINE_GAP_SECONDS * PCM_SAMPLE_RATE))
+        gap_bytes = b"\x00" * (gap_samples * PCM_SAMPLE_WIDTH)
+        merged_pcm = gap_bytes.join(line_pcms)
+
+        file_path = os.path.join(output_dir, f"scene_{scene_number}.wav")
+        with wave.open(file_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(PCM_SAMPLE_WIDTH)
+            wf.setframerate(PCM_SAMPLE_RATE)
+            wf.writeframes(merged_pcm)
+
+        audio_paths[scene_number] = file_path
+        line_timing[scene_number] = {
+            "lines": line_meta,
+            "gap_seconds": LINE_GAP_SECONDS,
         }
 
-        try:
-            pcm_bytes = _post_streaming_audio(
-                f"{OPENROUTER_BASE_URL}/chat/completions", api_key, payload
-            )
-
-            file_path = os.path.join(output_dir, f"scene_{scene_number}.wav")
-            with wave.open(file_path, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)  # pcm16 = 2 بايت لكل عينة
-                wf.setframerate(PCM_SAMPLE_RATE)
-                wf.writeframes(pcm_bytes)
-            audio_paths[scene_number] = file_path
-
-        except Exception as e:
-            raise RuntimeError(f"فشل توليد الصوت للمشهد رقم {scene_number}: {e}") from e
-
-    return audio_paths
+    return audio_paths, line_timing
 
 
 # --------------------------------------------------------------------------
@@ -535,11 +635,8 @@ def _sanitize_filename(name: str) -> str:
 
 def create_zip_package(script: dict, images_dir: str, audio_dir: str, output_dir: str) -> str:
     """
-    يجمع سيناريو القصة (JSON، متضمناً حقل sfx لكل مشهد) وكل الصور والملفات
-    الصوتية في حزمة ZIP واحدة.
-
-    Returns:
-        المسار الكامل لملف ZIP الناتج.
+    يجمع سيناريو القصة (JSON، متضمناً narration_lines بمددها الفعلية بعد
+    توليد الصوت) وكل الصور والملفات الصوتية في حزمة ZIP واحدة.
     """
     os.makedirs(output_dir, exist_ok=True)
 
