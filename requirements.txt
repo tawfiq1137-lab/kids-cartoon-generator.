@@ -1,4 +1,5 @@
-streamlit>=1.40
-requests>=2.32
-Pillow>=10.4
-imageio-ffmpeg>=0.5.1
+streamlit
+moviepy>=2.0.0
+pillow
+numpy
+faster-whisper
