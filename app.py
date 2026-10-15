@@ -1,62 +1,61 @@
 """
-Tool 1: English script -> ElevenLabs voice (fixed Voice ID) + word timestamps
-        -> voiceover.mp3 + subtitles.srt -> 16:9 video (optional burned-in subtitles)
-No background music. Optional very quiet ambient sound only.
-
-Install:  pip install requests pillow "moviepy==1.0.3"
-(moviepy needs ffmpeg installed on your system)
+Tool 1 (Streamlit): English script -> ElevenLabs voice (fixed Voice ID) + timestamps
+-> voiceover.mp3 + subtitles.srt -> 16:9 video from uploaded images. No background music.
 """
 
-import os
-import glob
-import json
 import base64
+import glob
+import os
 import random
+import tempfile
 import textwrap
-import requests
+
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+import requests
+import streamlit as st
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from moviepy.editor import (
-    AudioFileClip, ImageClip, CompositeVideoClip,
-    concatenate_videoclips, CompositeAudioClip,
+    AudioFileClip, CompositeAudioClip, CompositeVideoClip, ImageClip,
+    concatenate_videoclips,
 )
 import moviepy.audio.fx.all as afx
 
-# ======================= الإعدادات (غيّرها هنا) =======================
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "PUT_YOUR_API_KEY_HERE")
-VOICE_ID = "PUT_YOUR_FIXED_VOICE_ID_HERE"
-
+# ======================= إعدادات ثابتة =======================
 MODEL_ID = "eleven_multilingual_v2"
 VOICE_SETTINGS = {"stability": 0.60, "similarity_boost": 0.80, "style": 0.0}
-
-SCRIPT_FILE = "script.txt"
-IMAGES_DIR = "images"
-AMBIENT_FILE = None
-AMBIENT_VOLUME = 0.06
-OUTPUT_AUDIO = "voiceover.mp3"
-OUTPUT_SRT = "subtitles.srt"
-OUTPUT_VIDEO = "final.mp4"
-
-W, H, FPS = 1920, 1080, 24
+MAX_CHARS_PER_REQUEST = 9500          # حد ElevenLabs للطلب الواحد تقريبًا 10,000 حرف
+FPS = 24
 SCENE_MIN, SCENE_MAX = 3.0, 5.0
 ZOOM = 0.05
+AMBIENT_VOLUME = 0.06
 
-# --- إعدادات الترجمة ---
-BURN_SUBTITLES = False      # True = حرق الترجمة على الفيديو | False = ملف SRT فقط (لـ CC في يوتيوب)
-SUB_MAX_CHARS = 84          # أقصى عدد أحرف في الجملة الواحدة (سطرين)
-SUB_LINE_WIDTH = 42         # عرض السطر الواحد بالأحرف
-SUB_MAX_DURATION = 6.0      # أقصى مدة للجملة بالثواني
-FONT_PATH = "arial.ttf"     # Windows: arial.ttf | Linux: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf | Mac: /System/Library/Fonts/Helvetica.ttc
-FONT_SIZE = 44
-SUB_BOTTOM_MARGIN = 90      # المسافة من أسفل الشاشة
-# =====================================================================
+SUB_MAX_CHARS = 84
+SUB_LINE_WIDTH = 42
+SUB_MAX_DURATION = 6.0
+FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",   # Streamlit Cloud (via packages.txt)
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "arial.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+]
+
+RESOLUTIONS = {
+    "720p (أسرع، موصى به على Streamlit Cloud)": (1280, 720),
+    "1080p (جودة أعلى، أبطأ وأثقل)": (1920, 1080),
+}
+
+
+def get_secret(name: str, default: str = "") -> str:
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return os.getenv(name, default)
 
 
 # ---------------------- 1) الصوت + التوقيتات ----------------------
-def generate_voice_with_timestamps(text: str, mp3_path: str) -> dict:
-    """يرسل النص إلى endpoint الخاص بالـ timestamps، يحفظ MP3، ويرجّع alignment."""
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}/with-timestamps"
-    headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
+def generate_voice_with_timestamps(text, api_key, voice_id, mp3_path):
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/with-timestamps"
+    headers = {"xi-api-key": api_key, "Content-Type": "application/json"}
     payload = {"text": text, "model_id": MODEL_ID, "voice_settings": VOICE_SETTINGS}
 
     r = requests.post(url, headers=headers, json=payload, timeout=600)
@@ -66,16 +65,11 @@ def generate_voice_with_timestamps(text: str, mp3_path: str) -> dict:
     data = r.json()
     with open(mp3_path, "wb") as f:
         f.write(base64.b64decode(data["audio_base64"]))
-    print(f"[OK] Saved voiceover -> {mp3_path}")
-
-    alignment = data["alignment"]  # يطابق النص الأصلي حرفًا بحرف
-    with open("alignment.json", "w", encoding="utf-8") as f:  # للرجوع إليه عند الحاجة
-        json.dump(alignment, f)
-    return alignment
+    return data["alignment"]
 
 
-# ---------------------- 2) من الحروف إلى كلمات إلى جمل ----------------------
-def alignment_to_words(alignment: dict):
+# ---------------------- 2) الحروف -> كلمات -> جمل -> SRT ----------------------
+def alignment_to_words(alignment):
     chars = alignment["characters"]
     starts = alignment["character_start_times_seconds"]
     ends = alignment["character_end_times_seconds"]
@@ -97,7 +91,7 @@ def alignment_to_words(alignment: dict):
 
 
 def words_to_cues(words):
-    cues, buf, c_start = [], [], None
+    cues, buf, c_start, buf_end = [], [], None, None
     for text, s, e in words:
         if not buf:
             c_start = s
@@ -108,7 +102,7 @@ def words_to_cues(words):
             buf, c_start = [], s
         buf.append(text)
         buf_end = e
-        if text.endswith((".", "?", "!", "…")):  # نهاية جملة
+        if text.endswith((".", "?", "!", "…")):
             cues.append((c_start, buf_end, " ".join(buf)))
             buf = []
     if buf:
@@ -116,7 +110,7 @@ def words_to_cues(words):
     return cues
 
 
-def fmt_time(t: float) -> str:
+def fmt_time(t):
     ms = int(round(t * 1000))
     h, ms = divmod(ms, 3600000)
     m, ms = divmod(ms, 60000)
@@ -124,34 +118,58 @@ def fmt_time(t: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def write_srt(cues, path: str):
+def write_srt(cues, path):
     with open(path, "w", encoding="utf-8") as f:
         for i, (s, e, text) in enumerate(cues, 1):
             nxt = cues[i][0] if i < len(cues) else e + 1
-            e = max(e, min(s + 1.0, nxt))  # لا تقل المدة عن ثانية إن أمكن
+            e = max(e, min(s + 1.0, nxt))
             wrapped = textwrap.fill(text, width=SUB_LINE_WIDTH)
             f.write(f"{i}\n{fmt_time(s)} --> {fmt_time(e)}\n{wrapped}\n\n")
-    print(f"[OK] Saved subtitles -> {path} ({len(cues)} cues)")
 
 
-# ---------------------- 3) حرق الترجمة (بدون ImageMagick) ----------------------
-def make_subtitle_clip(text: str, start: float, end: float) -> ImageClip:
-    font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
-    box_h = 220
+# ---------------------- 3) الصور ----------------------
+def prepare_images(uploaded_files, folder, W, H):
+    """يحفظ الصور المرفوعة بحجم يغطي الإطار (يوفّر الذاكرة)."""
+    paths = []
+    for i, up in enumerate(uploaded_files):
+        img = ImageOps.exif_transpose(Image.open(up)).convert("RGB")
+        scale = max(W / img.width, H / img.height)
+        new_size = (max(W, round(img.width * scale)), max(H, round(img.height * scale)))
+        img = img.resize(new_size, Image.LANCZOS)
+        p = os.path.join(folder, f"img_{i:03d}.jpg")
+        img.save(p, quality=90)
+        paths.append(p)
+    return paths
+
+
+# ---------------------- 4) الترجمة المحروقة (بدون ImageMagick) ----------------------
+def load_font(size):
+    for p in FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(p, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def make_subtitle_clip(text, start, end, W, H):
+    font_size = int(44 * W / 1920)
+    font = load_font(font_size)
+    box_h = int(220 * W / 1920)
     img = Image.new("RGBA", (W, box_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.multiline_text(
         (W // 2, 10), textwrap.fill(text, width=SUB_LINE_WIDTH), font=font,
-        fill="white", stroke_width=3, stroke_fill="black",
+        fill="white", stroke_width=max(2, font_size // 14), stroke_fill="black",
         anchor="ma", align="center", spacing=10,
     )
     clip = ImageClip(np.array(img), transparent=True)
-    return (clip.set_start(start).set_duration(end - start)
-                .set_position(("center", H - box_h - SUB_BOTTOM_MARGIN + 120)))
+    y = H - box_h - int(40 * W / 1920)
+    return clip.set_start(start).set_duration(end - start).set_position(("center", y))
 
 
-# ---------------------- 4) الفيديو ----------------------
-def make_scene(path: str, duration: float) -> CompositeVideoClip:
+# ---------------------- 5) الفيديو ----------------------
+def make_scene(path, duration, W, H):
     clip = ImageClip(path)
     scale = max(W / clip.w, H / clip.h)
     clip = clip.resize(scale).set_duration(duration)
@@ -159,52 +177,131 @@ def make_scene(path: str, duration: float) -> CompositeVideoClip:
     return CompositeVideoClip([clip.set_position("center")], size=(W, H)).set_duration(duration)
 
 
-def build_video(audio_path: str, out_path: str, cues=None):
+def build_video(audio_path, image_paths, out_path, W, H, cues, burn, ambient_path, progress):
     voice = AudioFileClip(audio_path)
     total = voice.duration
-    print(f"[INFO] Voice duration: {total:.1f}s")
 
-    images = sorted(
-        glob.glob(os.path.join(IMAGES_DIR, "*.jpg"))
-        + glob.glob(os.path.join(IMAGES_DIR, "*.jpeg"))
-        + glob.glob(os.path.join(IMAGES_DIR, "*.png"))
-    )
-    if not images:
-        raise RuntimeError(f"No images found in '{IMAGES_DIR}'")
-    random.shuffle(images)
+    paths = image_paths[:]
+    random.shuffle(paths)
 
     scenes, elapsed, i = [], 0.0, 0
     while elapsed < total:
         d = min(random.uniform(SCENE_MIN, SCENE_MAX), total - elapsed)
-        scenes.append(make_scene(images[i % len(images)], d))
+        scenes.append(make_scene(paths[i % len(paths)], d, W, H))
         elapsed += d
         i += 1
-    print(f"[INFO] Scenes: {len(scenes)}")
+    progress(f"تم تجهيز {len(scenes)} مشهد، جارٍ الدمج والتصدير...")
 
     video = concatenate_videoclips(scenes, method="compose")
 
-    # حرق الترجمة (اختياري)
-    if BURN_SUBTITLES and cues:
-        subs = [make_subtitle_clip(t, s, min(e + 0.1, total)) for s, e, t in cues]
+    if burn and cues:
+        subs = [make_subtitle_clip(t, s, min(e + 0.1, total), W, H) for s, e, t in cues]
         video = CompositeVideoClip([video] + subs, size=(W, H))
 
-    if AMBIENT_FILE and os.path.exists(AMBIENT_FILE):
-        amb = AudioFileClip(AMBIENT_FILE)
+    if ambient_path:
+        amb = AudioFileClip(ambient_path)
         amb = afx.audio_loop(amb, duration=total).volumex(AMBIENT_VOLUME)
         audio = CompositeAudioClip([voice, amb])
     else:
         audio = voice
 
     video = video.set_audio(audio).set_duration(total)
-    video.write_videofile(out_path, fps=FPS, codec="libx264", audio_codec="aac")
-    print(f"[OK] Video saved -> {out_path}")
+    video.write_videofile(
+        out_path, fps=FPS, codec="libx264", audio_codec="aac",
+        preset="ultrafast", threads=2, logger=None,
+    )
+    voice.close()
+    return total, len(scenes)
 
 
-if __name__ == "__main__":
-    with open(SCRIPT_FILE, "r", encoding="utf-8") as f:
-        script_text = f.read().strip()
+def run_pipeline(script, images, api_key, voice_id, resolution, burn, ambient_up, status):
+    W, H = resolution
+    with tempfile.TemporaryDirectory() as tmp:
+        mp3_path = os.path.join(tmp, "voiceover.mp3")
+        srt_path = os.path.join(tmp, "subtitles.srt")
+        mp4_path = os.path.join(tmp, "final.mp4")
 
-    alignment = generate_voice_with_timestamps(script_text, OUTPUT_AUDIO)
-    cues = words_to_cues(alignment_to_words(alignment))
-    write_srt(cues, OUTPUT_SRT)
-    build_video(OUTPUT_AUDIO, OUTPUT_VIDEO, cues)
+        status.write("1/3 توليد الصوت والتوقيتات من ElevenLabs...")
+        alignment = generate_voice_with_timestamps(script, api_key, voice_id, mp3_path)
+
+        status.write("2/3 إنشاء ملف SRT...")
+        cues = words_to_cues(alignment_to_words(alignment))
+        write_srt(cues, srt_path)
+
+        status.write("3/3 تجهيز الصور وبناء الفيديو (قد يستغرق عدة دقائق)...")
+        img_paths = prepare_images(images, tmp, W, H)
+
+        ambient_path = None
+        if ambient_up is not None:
+            ambient_path = os.path.join(tmp, "ambient" + os.path.splitext(ambient_up.name)[1])
+            with open(ambient_path, "wb") as f:
+                f.write(ambient_up.getbuffer())
+
+        duration, n_scenes = build_video(
+            mp3_path, img_paths, mp4_path, W, H, cues, burn, ambient_path, status.write
+        )
+
+        with open(mp4_path, "rb") as f:
+            mp4_bytes = f.read()
+        with open(mp3_path, "rb") as f:
+            mp3_bytes = f.read()
+        with open(srt_path, "rb") as f:
+            srt_bytes = f.read()
+
+    return {
+        "mp4": mp4_bytes, "mp3": mp3_bytes, "srt": srt_bytes,
+        "duration": duration, "scenes": n_scenes,
+    }
+
+
+# ============================ الواجهة ============================
+st.set_page_config(page_title="Tool 1 - Video Maker", page_icon="🎬", layout="centered")
+st.title("🎬 الأداة الأولى: فيديو طويل 16:9")
+st.caption("سكربت إنجليزي → صوت ElevenLabs + ترجمة SRT → فيديو من صورك (بدون موسيقى)")
+
+with st.sidebar:
+    st.header("الإعدادات")
+    api_key = get_secret("ELEVENLABS_API_KEY") or st.text_input("ElevenLabs API Key", type="password")
+    voice_id = get_secret("VOICE_ID") or st.text_input("Voice ID (ثابت)")
+    res_label = st.selectbox("الدقة", list(RESOLUTIONS.keys()))
+    burn = st.checkbox("حرق الترجمة على الفيديو", value=False,
+                       help="اتركها مغلقة إن أردت رفع SRT كترجمة CC في يوتيوب والحفاظ على مظهر سينمائي نظيف.")
+    ambient_up = st.file_uploader("مؤثر طبيعي خفيف (اختياري)", type=["mp3", "wav"])
+
+script = st.text_area("النص الإنجليزي (Script)", height=300,
+                      placeholder="Paste your English script here...")
+st.caption(f"عدد الأحرف: {len(script)} / {MAX_CHARS_PER_REQUEST}")
+
+images = st.file_uploader("ارفع الصور (JPG/PNG بنسبة 16:9 يفضّل)",
+                          type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+if images:
+    st.caption(f"تم رفع {len(images)} صورة")
+
+if st.button("🚀 توليد الفيديو", type="primary"):
+    if not api_key or not voice_id:
+        st.error("أدخل ElevenLabs API Key و Voice ID (في الشريط الجانبي أو عبر Secrets).")
+    elif not script.strip():
+        st.error("أدخل النص الإنجليزي أولًا.")
+    elif len(script) > MAX_CHARS_PER_REQUEST:
+        st.error(f"النص أطول من الحد ({MAX_CHARS_PER_REQUEST} حرف). قسّمه إلى جزأين.")
+    elif not images:
+        st.error("ارفع صورة واحدة على الأقل.")
+    else:
+        try:
+            with st.status("جارٍ العمل...", expanded=True) as status:
+                st.session_state["result"] = run_pipeline(
+                    script.strip(), images, api_key, voice_id,
+                    RESOLUTIONS[res_label], burn, ambient_up, status,
+                )
+                status.update(label="اكتمل ✅", state="complete")
+        except Exception as e:
+            st.error(f"حدث خطأ: {e}")
+
+res = st.session_state.get("result")
+if res:
+    st.success(f"المدة: {res['duration'] / 60:.1f} دقيقة | عدد المشاهد: {res['scenes']}")
+    st.video(res["mp4"])
+    c1, c2, c3 = st.columns(3)
+    c1.download_button("⬇️ الفيديو (MP4)", res["mp4"], "final.mp4", "video/mp4")
+    c2.download_button("⬇️ الترجمة (SRT)", res["srt"], "subtitles.srt", "text/plain")
+    c3.download_button("⬇️ الصوت (MP3)", res["mp3"], "voiceover.mp3", "audio/mpeg")
