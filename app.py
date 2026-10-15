@@ -31,7 +31,7 @@ AMBIENT_VOLUME = 0.06
 
 SUB_MAX_CHARS = 84
 SUB_LINE_WIDTH = 42
-SUB_MAX_DURATION = 6.0
+SUB_MAX_DURATION = 7.0
 FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",   # Streamlit Cloud (via packages.txt)
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -66,6 +66,42 @@ def generate_voice_with_timestamps(text, api_key, voice_id, mp3_path):
     with open(mp3_path, "wb") as f:
         f.write(base64.b64decode(data["audio_base64"]))
     return data["alignment"]
+
+
+def generate_voice_plain(text, api_key, voice_id, mp3_path):
+    """TTS القياسي بدون توقيتات (يعمل على الحسابات المجانية)."""
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    headers = {"xi-api-key": api_key, "Content-Type": "application/json", "Accept": "audio/mpeg"}
+    payload = {"text": text, "model_id": MODEL_ID, "voice_settings": VOICE_SETTINGS}
+
+    r = requests.post(url, headers=headers, json=payload, timeout=600)
+    if r.status_code != 200:
+        raise RuntimeError(f"ElevenLabs error {r.status_code}: {r.text[:300]}")
+    with open(mp3_path, "wb") as f:
+        f.write(r.content)
+
+
+def estimate_words(text, duration):
+    """يوزّع مدة الصوت على الكلمات محليًا حسب طول الكلمة وعلامات الترقيم."""
+    tokens = text.split()
+    if not tokens:
+        return []
+    weights = []
+    for w in tokens:
+        wt = len(w.strip(".,;:!?…\"'()-")) + 1.0
+        if w.endswith((".", "?", "!", "…")):
+            wt += 6          # وقفة نهاية الجملة
+        elif w.endswith((",", ";", ":")):
+            wt += 3          # وقفة قصيرة
+        weights.append(wt)
+
+    total_w = sum(weights)
+    words, t = [], 0.0
+    for w, wt in zip(tokens, weights):
+        d = duration * wt / total_w
+        words.append((w, t, t + d))
+        t += d
+    return words
 
 
 # ---------------------- 2) الحروف -> كلمات -> جمل -> SRT ----------------------
@@ -214,18 +250,30 @@ def build_video(audio_path, image_paths, out_path, W, H, cues, burn, ambient_pat
     return total, len(scenes)
 
 
-def run_pipeline(script, images, api_key, voice_id, resolution, burn, ambient_up, status):
+def run_pipeline(script, images, api_key, voice_id, resolution, burn, ambient_up, use_ts, status):
     W, H = resolution
     with tempfile.TemporaryDirectory() as tmp:
         mp3_path = os.path.join(tmp, "voiceover.mp3")
         srt_path = os.path.join(tmp, "subtitles.srt")
         mp4_path = os.path.join(tmp, "final.mp4")
 
-        status.write("1/3 توليد الصوت والتوقيتات من ElevenLabs...")
-        alignment = generate_voice_with_timestamps(script, api_key, voice_id, mp3_path)
+        status.write("1/3 توليد الصوت من ElevenLabs...")
+        words = None
+        if use_ts:
+            try:
+                alignment = generate_voice_with_timestamps(script, api_key, voice_id, mp3_path)
+                words = alignment_to_words(alignment)
+            except Exception as e:
+                status.write(f"⚠️ تعذّرت التوقيتات الدقيقة ({str(e)[:200]}). سيتم التقدير محليًا.")
+        if words is None:
+            generate_voice_plain(script, api_key, voice_id, mp3_path)
+            probe = AudioFileClip(mp3_path)
+            audio_duration = probe.duration
+            probe.close()
+            words = estimate_words(script, audio_duration)
 
         status.write("2/3 إنشاء ملف SRT...")
-        cues = words_to_cues(alignment_to_words(alignment))
+        cues = words_to_cues(words)
         write_srt(cues, srt_path)
 
         status.write("3/3 تجهيز الصور وبناء الفيديو (قد يستغرق عدة دقائق)...")
@@ -266,6 +314,8 @@ with st.sidebar:
     res_label = st.selectbox("الدقة", list(RESOLUTIONS.keys()))
     burn = st.checkbox("حرق الترجمة على الفيديو", value=False,
                        help="اتركها مغلقة إن أردت رفع SRT كترجمة CC في يوتيوب والحفاظ على مظهر سينمائي نظيف.")
+    use_ts = st.checkbox("استخدام توقيتات ElevenLabs الدقيقة", value=False,
+                         help="تتطلب صلاحية/خطة مدفوعة. المغلق = تقدير التوقيتات محليًا (يعمل مع الخطة المجانية). عند الفشل يتم التقدير تلقائيًا.")
     ambient_up = st.file_uploader("مؤثر طبيعي خفيف (اختياري)", type=["mp3", "wav"])
 
 script = st.text_area("النص الإنجليزي (Script)", height=300,
@@ -291,7 +341,7 @@ if st.button("🚀 توليد الفيديو", type="primary"):
             with st.status("جارٍ العمل...", expanded=True) as status:
                 st.session_state["result"] = run_pipeline(
                     script.strip(), images, api_key, voice_id,
-                    RESOLUTIONS[res_label], burn, ambient_up, status,
+                    RESOLUTIONS[res_label], burn, ambient_up, use_ts, status,
                 )
                 status.update(label="اكتمل ✅", state="complete")
         except Exception as e:
