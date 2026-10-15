@@ -1,5 +1,3 @@
-streamlit
-moviepy>=2.0.0
-pillow
-numpy
-faster-whisper
+requests
+Pillow
+moviepy==1.0.3
