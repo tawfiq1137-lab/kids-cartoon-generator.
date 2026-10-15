@@ -14,6 +14,11 @@ import numpy as np
 import requests
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+# 🛠️ حل مشكلة ANTIALIAS لضمان عمل MoviePy بسلاسة مع الإصدارات الحديثة
+if not hasattr(Image, "ANTIALIAS"):
+    Image.ANTIALIAS = Image.LANCZOS
+
 from moviepy.editor import (
     AudioFileClip, CompositeAudioClip, CompositeVideoClip, ImageClip,
     concatenate_videoclips,
